@@ -2,6 +2,8 @@ import telebot
 import re
 import os
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -17,81 +19,64 @@ TARGET_LINK = "https://t.me/+ckfO94UHyhllODg0"
 TARGET_INVITE_CODE = "+ckfO94UHyhllODg0"
 CREDITS = "\n\n<b>Give Credits !!!</b>\n<i>Rogue Nomad</i>"
 
+# --- FAKE WEB SERVER FOR RENDER ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive.")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    logging.info(f"Dummy server running on port {port}")
+    server.serve_forever()
+
+# --- BOT LOGIC ---
 def unroll_hidden_links(text, entities):
-    """
-    Finds invisible 'text_link' entities (like 'Click here'), extracts 
-    the hidden URL, and replaces the visible text with the actual URL.
-    """
     if not text or not entities:
         return text
-    
-    # We sort in reverse order so we don't mess up the character offsets
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    
     for entity in sorted_entities:
         if entity.type == 'text_link':
-            # Replace "Click here" with the actual hidden URL
             text = text[:entity.offset] + entity.url + text[entity.offset + entity.length:]
-            
     return text
 
 def process_text(text, entities):
     if not text:
         return CREDITS
     
-    # 1. Unroll the invisible links
     unrolled_text = unroll_hidden_links(text, entities)
-    
-    # 2. Split Title (first line) and Body (rest of message)
     parts = unrolled_text.split('\n', 1)
     title = parts[0].strip()
     body = parts[1] if len(parts) > 1 else ""
     
-    # 3. COAT THE TITLE
-    # Strip any URLs or t.me links from the title so we can wrap the whole title cleanly
     title_clean = re.sub(r'(?:https?://|//)?(?:t\.me|www\.)[^\s]+', '', title).strip()
     title_clean = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', '@rogueen', title_clean)
-    
     final_title = f'<a href="{TARGET_LINK}">{title_clean}</a>' if title_clean else ""
 
-    # 4. PROCESS THE BODY
-    # A. Nuke other t.me links (Replace directly with your link)
     tme_pattern = r'(?:https?://|//)?t\.me/[^\s]+'
-    def replace_tme(match):
-        if TARGET_INVITE_CODE in match.group(0):
-            return TARGET_LINK
-        return TARGET_LINK # Overwrite any other telegram link directly
-    body = re.sub(tme_pattern, replace_tme, body)
+    body = re.sub(tme_pattern, lambda m: TARGET_LINK, body)
     
-    # B. Hijack Mentions (@username -> @rogueen)
     mention_pattern = r'(?<![\w\.])@[a-zA-Z0-9_]+'
     body = re.sub(mention_pattern, f'<a href="{TARGET_LINK}">@rogueen</a>', body)
     
-    # C. Cloak normal links (Chatgpt.com -> looks like chatgpt.com but goes to your link)
-    # First, protect your target link so it doesn't get double-coated
     placeholder = "___TARGET_LINK_PLACEHOLDER___"
     body = body.replace(TARGET_LINK, placeholder)
     
-    # Match http/https/www links
     url_pattern = r'(?:https?://|www\.)[^\s<]+'
     body = re.sub(url_pattern, lambda m: f'<a href="{TARGET_LINK}">{m.group(0)}</a>', body)
     
-    # Restore your link
     body = body.replace(placeholder, TARGET_LINK)
-    
-    # Clean up extra spaces
     body = re.sub(r' +', ' ', body).strip()
     
-    # 5. Combine Title and Body
     final_text = f"{final_title}\n\n{body}" if final_title and body else final_title or body
     return final_text + CREDITS
-
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
 def handle_forward(message):
     try:
         raw_text = message.text or message.caption
-        # Extract text entities or caption entities
         entities = message.entities or message.caption_entities
         final_text = process_text(raw_text, entities)
         
@@ -110,12 +95,16 @@ def handle_forward(message):
         elif message.text:
             bot.send_message(CHANNEL_ID, text=final_text, parse_mode='HTML', disable_web_page_preview=True)
             
-        bot.reply_to(message, "✅ Entity links unrolled, Title coated, and posted to the channel.")
+        bot.reply_to(message, "✅ Posted to channel.")
             
     except Exception as e:
         logging.error(f"Error processing message: {e}")
-        bot.reply_to(message, "❌ Failed to post. Check logs.")
+        bot.reply_to(message, f"❌ Failed: {e}")
 
 if __name__ == "__main__":
+    # 1. Start the dummy web server in the background (Fix for Render)
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    
+    # 2. Start the bot
     logging.info("CAT's Entity Hijacker Bot is live. Executing.")
     bot.infinity_polling()
