@@ -17,48 +17,84 @@ TARGET_LINK = "https://t.me/+ckfO94UHyhllODg0"
 TARGET_INVITE_CODE = "+ckfO94UHyhllODg0"
 CREDITS = "\n\n<b>Give Credits !!!</b>\n<i>Rogue Nomad</i>"
 
-def process_text(text):
+def unroll_hidden_links(text, entities):
+    """
+    Finds invisible 'text_link' entities (like 'Click here'), extracts 
+    the hidden URL, and replaces the visible text with the actual URL.
+    """
+    if not text or not entities:
+        return text
+    
+    # We sort in reverse order so we don't mess up the character offsets
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    
+    for entity in sorted_entities:
+        if entity.type == 'text_link':
+            # Replace "Click here" with the actual hidden URL
+            text = text[:entity.offset] + entity.url + text[entity.offset + entity.length:]
+            
+    return text
+
+def process_text(text, entities):
     if not text:
         return CREDITS
     
-    # 1. Obliterate ANY Telegram link that doesn't have your invite code
-    tme_pattern = r'(?:https?://)?t\.me/[^\s]+'
+    # 1. Unroll the invisible links
+    unrolled_text = unroll_hidden_links(text, entities)
     
-    def remove_tme(match):
-        original_url = match.group(0)
-        # If it's your target link, keep it
-        if TARGET_INVITE_CODE in original_url:
-            return original_url
-        # If it's some other t.me link, erase it completely
-        return ""
+    # 2. Split Title (first line) and Body (rest of message)
+    parts = unrolled_text.split('\n', 1)
+    title = parts[0].strip()
+    body = parts[1] if len(parts) > 1 else ""
     
-    processed = re.sub(tme_pattern, remove_tme, text)
+    # 3. COAT THE TITLE
+    # Strip any URLs or t.me links from the title so we can wrap the whole title cleanly
+    title_clean = re.sub(r'(?:https?://|//)?(?:t\.me|www\.)[^\s]+', '', title).strip()
+    title_clean = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', '@rogueen', title_clean)
     
-    # 2. Cloak normal web links (http/https) to point to your channel
-    url_pattern = r'https?://[^\s]+'
+    final_title = f'<a href="{TARGET_LINK}">{title_clean}</a>' if title_clean else ""
+
+    # 4. PROCESS THE BODY
+    # A. Nuke other t.me links (Replace directly with your link)
+    tme_pattern = r'(?:https?://|//)?t\.me/[^\s]+'
+    def replace_tme(match):
+        if TARGET_INVITE_CODE in match.group(0):
+            return TARGET_LINK
+        return TARGET_LINK # Overwrite any other telegram link directly
+    body = re.sub(tme_pattern, replace_tme, body)
     
-    def cloak_url(match):
-        original_url = match.group(0)
-        # Skip if it's your target link
-        if TARGET_INVITE_CODE in original_url:
-            return original_url
-        # Cloak the normal link
-        return f'<a href="{TARGET_LINK}">{original_url}</a>'
+    # B. Hijack Mentions (@username -> @rogueen)
+    mention_pattern = r'(?<![\w\.])@[a-zA-Z0-9_]+'
+    body = re.sub(mention_pattern, f'<a href="{TARGET_LINK}">@rogueen</a>', body)
     
-    processed = re.sub(url_pattern, cloak_url, processed)
+    # C. Cloak normal links (Chatgpt.com -> looks like chatgpt.com but goes to your link)
+    # First, protect your target link so it doesn't get double-coated
+    placeholder = "___TARGET_LINK_PLACEHOLDER___"
+    body = body.replace(TARGET_LINK, placeholder)
     
-    # Clean up any double spaces left behind by the deleted links
-    processed = re.sub(r' +', ' ', processed).strip()
+    # Match http/https/www links
+    url_pattern = r'(?:https?://|www\.)[^\s<]+'
+    body = re.sub(url_pattern, lambda m: f'<a href="{TARGET_LINK}">{m.group(0)}</a>', body)
     
-    return processed + CREDITS
+    # Restore your link
+    body = body.replace(placeholder, TARGET_LINK)
+    
+    # Clean up extra spaces
+    body = re.sub(r' +', ' ', body).strip()
+    
+    # 5. Combine Title and Body
+    final_text = f"{final_title}\n\n{body}" if final_title and body else final_title or body
+    return final_text + CREDITS
+
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
 def handle_forward(message):
     try:
         raw_text = message.text or message.caption
-        final_text = process_text(raw_text)
+        # Extract text entities or caption entities
+        entities = message.entities or message.caption_entities
+        final_text = process_text(raw_text, entities)
         
-        # Send to your CHANNEL_ID, not back to the user
         if message.photo:
             bot.send_photo(CHANNEL_ID, message.photo[-1].file_id, caption=final_text, parse_mode='HTML')
         elif message.video:
@@ -74,13 +110,12 @@ def handle_forward(message):
         elif message.text:
             bot.send_message(CHANNEL_ID, text=final_text, parse_mode='HTML', disable_web_page_preview=True)
             
-        # Optional: Let the user know it was posted
-        bot.reply_to(message, "✅ Content scrubbed and posted to the channel.")
+        bot.reply_to(message, "✅ Entity links unrolled, Title coated, and posted to the channel.")
             
     except Exception as e:
         logging.error(f"Error processing message: {e}")
-        bot.reply_to(message, "❌ Failed to post. Check bot admin rights and Channel ID.")
+        bot.reply_to(message, "❌ Failed to post. Check logs.")
 
 if __name__ == "__main__":
-    logging.info("CAT's Total Hijack Bot is live. Executing.")
+    logging.info("CAT's Entity Hijacker Bot is live. Executing.")
     bot.infinity_polling()
