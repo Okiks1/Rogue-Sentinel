@@ -4,7 +4,13 @@ import os
 import logging
 import threading
 import copy
+from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from telebot.formatting import format_text, _html_tags
+
+# Ensure blockquotes work flawlessly
+_html_tags['blockquote'] = 'blockquote'
+_html_tags['expandable_blockquote'] = 'blockquote expandable'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -33,120 +39,80 @@ def run_dummy_server():
     logging.info(f"Dummy server running on port {port}")
     server.serve_forever()
 
-# --- ENTITY PARSER (THE MAGIC) ---
-def process_chunked(text, entities):
-    if not text: return ""
-    
-    # Fallback if no entities exist (catches stray text)
-    if not entities:
-        t = re.sub(r'(?:https?://|//)?t\.me/[^\s]+', TARGET_LINK, text)
-        t = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', f'<a href="{TARGET_LINK}">@rogueen</a>', t)
-        t = re.sub(r'(?:https?://|www\.)[^\s]+', lambda m: f'<a href="{TARGET_LINK}">{m.group(0)}</a>', t)
-        return t
-
-    # Sort entities by offset descending so we can modify string without breaking offsets
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    chunks = []
-    last_idx = len(text)
-
-    for e in sorted_entities:
-        start = e.offset
-        end = e.offset + e.length
-        if end > len(text): continue
-
-        plain_chunk = text[end:last_idx]
-        if plain_chunk:
-            chunks.append(("plain", plain_chunk))
-
-        content = text[start:end]
-        chunks.append((e.type, content, getattr(e, 'url', None)))
-        last_idx = start
-
-    if last_idx > 0:
-        chunks.append(("plain", text[:last_idx]))
-
-    chunks.reverse()
-    result = []
-
-    for chunk in chunks:
-        if chunk[0] == "plain":
-            t = chunk[1]
-            t = re.sub(r'(?:https?://|//)?t\.me/[^\s]+', TARGET_LINK, t)
-            t = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', f'<a href="{TARGET_LINK}">@rogueen</a>', t)
-            t = re.sub(r'(?:https?://|www\.)[^\s]+', lambda m: f'<a href="{TARGET_LINK}">{m.group(0)}</a>', t)
-            result.append(t)
-        else:
-            e_type, content, url = chunk[0], chunk[1], chunk[2]
-            
-            if e_type == 'text_link':
-                # Keep original text, hijack the URL
-                result.append(f'<a href="{TARGET_LINK}">{content}</a>')
-            elif e_type == 'mention':
-                # Replace mention text, hijack URL
-                result.append(f'<a href="{TARGET_LINK}">@rogueen</a>')
-            elif e_type == 'url':
-                if 't.me/' in content and TARGET_INVITE_CODE not in content:
-                    # Nuke other telegram links as raw text
-                    result.append(TARGET_LINK)
-                else:
-                    # Cloak normal web links
-                    result.append(f'<a href="{TARGET_LINK}">{content}</a>')
-            elif e_type == 'bold':
-                result.append(f'<b>{content}</b>')
-            elif e_type == 'italic':
-                result.append(f'<i>{content}</i>')
-            elif e_type == 'underline':
-                result.append(f'<u>{content}</u>')
-            elif e_type == 'strikethrough':
-                result.append(f'<s>{content}</s>')
-            elif e_type == 'code':
-                result.append(f'<code>{content}</code>')
-            elif e_type == 'pre':
-                result.append(f'<pre>{content}</pre>')
-            elif e_type == 'blockquote':
-                result.append(f'<blockquote>{content}</blockquote>')
-            elif e_type == 'expandable_blockquote':
-                result.append(f'<blockquote expandable>{content}</blockquote>')
-            else:
-                result.append(content)
-                
-    return "".join(result)
-
+# --- BOT LOGIC ---
 def process_text(text, entities):
     if not text: return CREDITS
     
-    # 1. Split Title and Body safely at the first newline
     first_nl = text.find('\n')
     if first_nl == -1:
         title_text = text
         body_text = ""
-        title_entities = entities
+        title_entities = entities or []
         body_entities = []
     else:
         title_text = text[:first_nl]
         body_text = text[first_nl+1:]
-        
-        title_entities = []
+        title_entities = [e for e in entities if e.offset + e.length <= first_nl]
         body_entities = []
         for e in entities:
-            if e.offset + e.length <= first_nl:
-                title_entities.append(e)
-            elif e.offset >= first_nl + 1:
+            if e.offset >= first_nl + 1:
                 new_e = copy.copy(e)
                 new_e.offset = e.offset - (first_nl + 1)
                 body_entities.append(new_e)
 
-    # 2. Process entities to HTML
-    title_html = process_chunked(title_text, title_entities)
-    body_html = process_chunked(body_text, body_entities)
-
-    # 3. Coat the Title
-    # Strip blockquotes from title so it wraps perfectly
-    title_clean = title_html.replace('<blockquote>', '').replace('</blockquote>', '').replace('<blockquote expandable>', '').strip()
+    # 1. Process Title (Coating it in your link)
+    try:
+        html_title = format_text(title_text, title_entities)
+    except Exception:
+        html_title = title_text
+        
+    title_clean = re.sub(r'<[^>]+>', '', html_title).strip()
+    title_clean = re.sub(r'(?:https?://|//)?(?:t\.me|www\.)[^\s]+', '', title_clean).strip()
+    title_clean = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', '@rogueen', title_clean)
     final_title = f'<a href="{TARGET_LINK}">{title_clean}</a>' if title_clean else ""
 
-    # 4. Combine
-    final_text = f"{final_title}\n\n{body_html}" if final_title and body_html else final_title or body_html
+    # 2. Process Body (Fix the scattered link mess)
+    try:
+        html_body = format_text(body_text, body_entities)
+    except Exception:
+        html_body = body_text
+        
+    def replacer(match):
+        url = match.group(1)
+        txt = match.group(2)
+        
+        # Leave your own link alone
+        if TARGET_INVITE_CODE in url:
+            return match.group(0)
+            
+        # Nuke other t.me links into plain text
+        if 't.me/' in url:
+            return TARGET_LINK
+            
+        # For hidden links (like "LINK" pointing to a massive URL), 
+        # extract just the domain so it doesn't break the blockquote layout.
+        try:
+            domain = urlparse(url).netloc.replace('www.', '')
+            if not domain: domain = txt
+        except:
+            domain = txt
+            
+        return f'<a href="{TARGET_LINK}">{domain}</a>'
+        
+    # Hijack all URLs in the body
+    html_body = re.sub(r'<a href="([^"]+)">(.*?)</a>', replacer, html_body)
+    
+    # Hijack mentions in the body
+    def mention_replacer(match):
+        if TARGET_INVITE_CODE in match.group(1): return match.group(0)
+        return f'<a href="{TARGET_LINK}">@rogueen</a>'
+        
+    html_body = re.sub(r'<a href="(https://t\.me/[^"]+)">(@[a-zA-Z0-9_]+)</a>', mention_replacer, html_body)
+    
+    # Clean up extra spaces
+    html_body = re.sub(r' +', ' ', html_body).strip()
+    
+    final_text = f"{final_title}\n\n{html_body}" if final_title and html_body else final_title or html_body
     return final_text + CREDITS
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
@@ -171,7 +137,7 @@ def handle_forward(message):
         elif message.text:
             bot.send_message(CHANNEL_ID, text=final_text, parse_mode='HTML', disable_web_page_preview=True)
             
-        bot.reply_to(message, "✅ Formatting preserved, links hijacked, posted.")
+        bot.reply_to(message, "✅ Formatting restored, links hijacked, posted.")
             
     except Exception as e:
         logging.error(f"Error processing message: {e}")
