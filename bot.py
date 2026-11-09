@@ -3,12 +3,11 @@ import re
 import os
 import logging
 
-# Set up bulletproof logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is missing. Do not run this without it.")
+    raise ValueError("BOT_TOKEN environment variable is missing.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -19,22 +18,32 @@ def process_text(text):
     if not text:
         return CREDITS
     
-    # Regex to catch http://, https://, and bare t.me/ links
-    url_pattern = r'(https?://[^\s]+|(?<!\w)t\.me/[^\s]+)'
+    # 1. Nuke all t.me links completely (with or without https://)
+    # This catches bare "t.me/..." and full "https://t.me/..."
+    tme_pattern = r'(?:https?://)?t\.me/[^\s]+'
     
-    def replace(match):
+    def replace_tme(match):
         original_url = match.group(0)
-        
-        # If it's already your target link, leave it untouched
+        # If it's already your target, leave it alone
         if TARGET_LINK in original_url:
             return original_url
-            
-        # Otherwise, cloak the original text to point to your channel
-        # We use HTML anchor tags for Telegram's text_link entity
+        # Completely replace the visible text with your link
+        return f'<a href="{TARGET_LINK}">{TARGET_LINK}</a>'
+    
+    processed = re.sub(tme_pattern, replace_tme, text)
+    
+    # 2. Cloak normal web links (http/https) that are NOT telegram links
+    url_pattern = r'https?://[^\s]+'
+    
+    def replace_url(match):
+        original_url = match.group(0)
+        # Skip if it's your target link
+        if TARGET_LINK in original_url:
+            return original_url
+        # Cloak the normal link (show original text, link to your channel)
         return f'<a href="{TARGET_LINK}">{original_url}</a>'
     
-    # Replace all matched links
-    processed = re.sub(url_pattern, replace, text)
+    processed = re.sub(url_pattern, replace_url, processed)
     
     # Append the credit footer
     return processed + CREDITS
@@ -42,11 +51,9 @@ def process_text(text):
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
 def handle_forward(message):
     try:
-        # Get the raw text or caption
         raw_text = message.text or message.caption
         final_text = process_text(raw_text)
         
-        # Send WITHOUT the forward tag using copy/send methods
         if message.photo:
             bot.send_photo(message.chat.id, message.photo[-1].file_id, caption=final_text, parse_mode='HTML')
         elif message.video:
@@ -66,5 +73,5 @@ def handle_forward(message):
         logging.error(f"Error processing message: {e}")
 
 if __name__ == "__main__":
-    logging.info("CAT's Cloaker Bot is live. Executing.")
+    logging.info("CAT's Total Hijack Bot is live. Executing.")
     bot.infinity_polling()
