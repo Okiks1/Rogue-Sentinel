@@ -3,14 +3,10 @@ import re
 import os
 import logging
 import threading
-import copy
+import html
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telebot.formatting import format_text, _html_tags
-
-# Ensure blockquotes work flawlessly
-_html_tags['blockquote'] = 'blockquote'
-_html_tags['expandable_blockquote'] = 'blockquote expandable'
+from telebot.formatting import format_text
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -43,76 +39,68 @@ def run_dummy_server():
 def process_text(text, entities):
     if not text: return CREDITS
     
-    first_nl = text.find('\n')
-    if first_nl == -1:
-        title_text = text
-        body_text = ""
-        title_entities = entities or []
-        body_entities = []
-    else:
-        title_text = text[:first_nl]
-        body_text = text[first_nl+1:]
-        title_entities = [e for e in entities if e.offset + e.length <= first_nl]
-        body_entities = []
-        for e in entities:
-            if e.offset >= first_nl + 1:
-                new_e = copy.copy(e)
-                new_e.offset = e.offset - (first_nl + 1)
-                body_entities.append(new_e)
-
-    # 1. Process Title (Coating it in your link)
+    # 1. Convert ALL entities to HTML safely using Telebot's engine
     try:
-        html_title = format_text(title_text, title_entities)
-    except Exception:
-        html_title = title_text
-        
-    title_clean = re.sub(r'<[^>]+>', '', html_title).strip()
+        html_text = format_text(text, entities)
+    except Exception as e:
+        logging.error(f"Formatting error: {e}")
+        html_text = html.escape(text)
+
+    # 2. Split the HTML into Title and Body safely
+    parts = html_text.split('\n', 1)
+    title_html = parts[0].strip()
+    body_html = parts[1] if len(parts) > 1 else ""
+
+    # 3. Process Title (Coating it in your link)
+    # Strip all HTML tags and unescape entities to get clean text for the title
+    title_clean = re.sub(r'<[^>]+>', '', title_html)
+    title_clean = html.unescape(title_clean)
+    # Strip any raw URLs from the title
     title_clean = re.sub(r'(?:https?://|//)?(?:t\.me|www\.)[^\s]+', '', title_clean).strip()
+    # Hijack mentions in title
     title_clean = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', '@rogueen', title_clean)
+    
+    # Wrap the entire clean title in your channel link
     final_title = f'<a href="{TARGET_LINK}">{title_clean}</a>' if title_clean else ""
 
-    # 2. Process Body (Fix the scattered link mess)
-    try:
-        html_body = format_text(body_text, body_entities)
-    except Exception:
-        html_body = body_text
-        
+    # 4. Process Body
+    # A. Nuke any plain text t.me links that Telegram didn't format as entities
+    body_html = re.sub(r'(?:https?://|//)?t\.me/[^\s<]+', TARGET_LINK, body_html)
+
+    # B. Hijack formatted <a> tags (like the "LINK" word pointing to mlh.com)
     def replacer(match):
         url = match.group(1)
         txt = match.group(2)
         
-        # Leave your own link alone
         if TARGET_INVITE_CODE in url:
             return match.group(0)
             
-        # Nuke other t.me links into plain text
         if 't.me/' in url:
             return TARGET_LINK
             
-        # For hidden links (like "LINK" pointing to a massive URL), 
-        # extract just the domain so it doesn't break the blockquote layout.
+        # Extract the domain name to keep the blockquote clean
         try:
             domain = urlparse(url).netloc.replace('www.', '')
             if not domain: domain = txt
         except:
             domain = txt
             
+        # Return the clean domain text, but pointing to TARGET_LINK
         return f'<a href="{TARGET_LINK}">{domain}</a>'
         
-    # Hijack all URLs in the body
-    html_body = re.sub(r'<a href="([^"]+)">(.*?)</a>', replacer, html_body)
+    body_html = re.sub(r'<a href="([^"]+)">(.*?)</a>', replacer, body_html)
     
-    # Hijack mentions in the body
-    def mention_replacer(match):
-        if TARGET_INVITE_CODE in match.group(1): return match.group(0)
-        return f'<a href="{TARGET_LINK}">@rogueen</a>'
-        
-    html_body = re.sub(r'<a href="(https://t\.me/[^"]+)">(@[a-zA-Z0-9_]+)</a>', mention_replacer, html_body)
+    # C. Hijack remaining raw mentions in the body text
+    body_html = re.sub(r'(?<![\w\.])@[a-zA-Z0-9_]+', f'<a href="{TARGET_LINK}">@rogueen</a>', body_html)
     
-    # Clean up extra spaces
-    html_body = re.sub(r' +', ' ', html_body).strip()
-    
-    final_text = f"{final_title}\n\n{html_body}" if final_title and html_body else final_title or html_body
+    # D. Cloak any remaining plain text URLs in body
+    placeholder = "___TARGET_LINK_PLACEHOLDER___"
+    body_html = body_html.replace(TARGET_LINK, placeholder)
+    body_html = re.sub(r'(?:https?://|www\.)[^\s<]+', lambda m: f'<a href="{TARGET_LINK}">{m.group(0)}</a>', body_html)
+    body_html = body_html.replace(placeholder, TARGET_LINK)
+
+    # 5. Combine and add credits
+    final_text = f"{final_title}\n\n{body_html}" if final_title and body_html else final_title or body_html
     return final_text + CREDITS
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
@@ -137,7 +125,7 @@ def handle_forward(message):
         elif message.text:
             bot.send_message(CHANNEL_ID, text=final_text, parse_mode='HTML', disable_web_page_preview=True)
             
-        bot.reply_to(message, "✅ Formatting restored, links hijacked, posted.")
+        bot.reply_to(message, "✅ Formatting fixed, links hijacked, posted.")
             
     except Exception as e:
         logging.error(f"Error processing message: {e}")
