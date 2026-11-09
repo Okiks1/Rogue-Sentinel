@@ -1,161 +1,70 @@
-import os
 import telebot
-from flask import Flask, request, abort
+import re
+import os
+import logging
 
-# =====================================
-# ROGUE NOMAD FORWARDER
-# =====================================
+# Set up bulletproof logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OWNER_ID = int(os.environ["OWNER_ID"])
-WEBHOOK_URL = os.environ["WEBHOOK_URL"].rstrip("/")
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
-
-CHANNEL_LINK = "https://t.me/+ckfO94UHyhllODg0"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is missing. Do not run this without it.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
 
+TARGET_LINK = "https://t.me/+ckfO94UHyhllODg0"
+CREDITS = "\n\n<b>Give Credits !!!</b>\n<i>Rogue Nomad</i>"
 
-# =====================================
-# HEALTH CHECK
-# =====================================
+def process_text(text):
+    if not text:
+        return CREDITS
+    
+    # Regex to catch http://, https://, and bare t.me/ links
+    url_pattern = r'(https?://[^\s]+|(?<!\w)t\.me/[^\s]+)'
+    
+    def replace(match):
+        original_url = match.group(0)
+        
+        # If it's already your target link, leave it untouched
+        if TARGET_LINK in original_url:
+            return original_url
+            
+        # Otherwise, cloak the original text to point to your channel
+        # We use HTML anchor tags for Telegram's text_link entity
+        return f'<a href="{TARGET_LINK}">{original_url}</a>'
+    
+    # Replace all matched links
+    processed = re.sub(url_pattern, replace, text)
+    
+    # Append the credit footer
+    return processed + CREDITS
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Rogue Nomad Forwarder is running!", 200
-
-
-# =====================================
-# START COMMAND
-# =====================================
-
-@bot.message_handler(commands=["start"])
-def start(message):
-
-    if message.from_user.id != OWNER_ID:
-        return
-
-    bot.reply_to(
-        message,
-        "⚡ Rogue Nomad Forwarder is online!\n\n"
-        "Forward text, pictures, videos or documents to me."
-    )
-
-
-# =====================================
-# USER ID COMMAND
-# =====================================
-
-@bot.message_handler(commands=["id"])
-def get_id(message):
-
-    bot.reply_to(
-        message,
-        f"Your Telegram ID: {message.from_user.id}"
-    )
-
-
-# =====================================
-# MESSAGE PROCESSING
-# =====================================
-
-@bot.message_handler(
-    content_types=[
-        "text",
-        "photo",
-        "video",
-        "document",
-        "audio",
-        "voice",
-        "video_note",
-        "animation",
-        "sticker",
-        "contact",
-        "location",
-        "venue",
-        "poll",
-        "dice"
-    ]
-)
-def process_content(message):
-
-    # Only the owner can use this bot
-    if not message.from_user:
-        return
-
-    if message.from_user.id != OWNER_ID:
-        return
-
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'animation', 'voice'])
+def handle_forward(message):
     try:
+        # Get the raw text or caption
+        raw_text = message.text or message.caption
+        final_text = process_text(raw_text)
+        
+        # Send WITHOUT the forward tag using copy/send methods
+        if message.photo:
+            bot.send_photo(message.chat.id, message.photo[-1].file_id, caption=final_text, parse_mode='HTML')
+        elif message.video:
+            bot.send_video(message.chat.id, message.video.file_id, caption=final_text, parse_mode='HTML')
+        elif message.document:
+            bot.send_document(message.chat.id, message.document.file_id, caption=final_text, parse_mode='HTML')
+        elif message.audio:
+            bot.send_audio(message.chat.id, message.audio.file_id, caption=final_text, parse_mode='HTML')
+        elif message.animation:
+            bot.send_animation(message.chat.id, message.animation.file_id, caption=final_text, parse_mode='HTML')
+        elif message.voice:
+            bot.send_voice(message.chat.id, message.voice.file_id, caption=final_text, parse_mode='HTML')
+        elif message.text:
+            bot.send_message(message.chat.id, text=final_text, parse_mode='HTML', disable_web_page_preview=True)
+            
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
 
-        # Copy the original content without forwarding attribution
-        bot.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id
-        )
-
-        # Add a clearly identified channel invitation
-        bot.send_message(
-            message.chat.id,
-            "⚡ <b>ROGUE NOMAD</b>\n"
-            "Join our community for more resources:\n"
-            f'<a href="{CHANNEL_LINK}">Join Rogue Nomad</a>',
-            parse_mode="HTML"
-        )
-
-    except Exception as error:
-
-        print(f"Message processing error: {error}")
-
-        bot.reply_to(
-            message,
-            "❌ I couldn't process this message. "
-            "Please try again."
-        )
-
-
-# =====================================
-# TELEGRAM WEBHOOK
-# =====================================
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-
-    received_secret = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token"
-    )
-
-    if received_secret != WEBHOOK_SECRET:
-        abort(403)
-
-    try:
-
-        update = telebot.types.Update.de_json(
-            request.get_data().decode("utf-8")
-        )
-
-        bot.process_new_updates([update])
-
-        return "OK", 200
-
-    except Exception as error:
-
-        print(f"Webhook error: {error}")
-
-        return "Error", 500
-
-
-# =====================================
-# REGISTER WEBHOOK
-# =====================================
-
-webhook_response = bot.set_webhook(
-    url=f"{WEBHOOK_URL}/webhook",
-    secret_token=WEBHOOK_SECRET,
-    allowed_updates=["message"]
-)
-
-print("Webhook registration:", webhook_response)
-print("Rogue Nomad Forwarder is ready!")
+if __name__ == "__main__":
+    logging.info("CAT's Cloaker Bot is live. Executing.")
+    bot.infinity_polling()
